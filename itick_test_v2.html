@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iTick 5銘柄取得テスト（修正版）</title>
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:950px;margin:28px auto;padding:0 16px;color:#222}
+h1{font-size:23px}.note{color:#666;font-size:14px}
+input{width:100%;box-sizing:border-box;padding:11px;margin:6px 0 12px;border:1px solid #bbb;border-radius:6px}
+button{padding:10px 18px;border:0;border-radius:6px;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:20px}
+th,td{border-bottom:1px solid #ddd;padding:9px;text-align:right}
+th:first-child,td:first-child{text-align:left}
+pre{background:#f5f5f5;padding:12px;border-radius:6px;white-space:pre-wrap;overflow:auto}
+#status{margin-left:10px}
+</style>
+</head>
+<body>
+<h1>iTick 5銘柄取得テスト（修正版）</h1>
+<p class="note">対象：NVDU / MUU / SOXL / UGLD / BABX</p>
+<p class="note">無料試用APIエンドポイントを使用します。Tokenは保存しません。</p>
+
+<label for="token">iTick API Token</label>
+<input id="token" type="password" autocomplete="off" placeholder="API Tokenを入力">
+<button id="run">取得テスト</button><span id="status"></span>
+
+<table>
+<thead><tr><th>銘柄</th><th>現在値</th><th>前日終値</th><th>前日比</th><th>取引状態</th><th>取得時刻</th></tr></thead>
+<tbody id="tbody"></tbody>
+</table>
+
+<h3>API診断</h3>
+<pre id="diag">未実行</pre>
+
+<script>
+const BASE="https://api-free.itick.org";
+const symbols=["NVDU","MUU","SOXL","UGLD","BABX"];
+
+async function api(path,token){
+  const r=await fetch(BASE+path,{headers:{accept:"application/json",token:token}});
+  const text=await r.text();
+  let j;
+  try{j=JSON.parse(text)}catch(e){
+    throw new Error("HTTP "+r.status+" / JSONではない応答: "+text.slice(0,500));
+  }
+  if(!r.ok || j.code!==0){
+    throw new Error("HTTP "+r.status+" / API code="+j.code+" / msg="+JSON.stringify(j.msg));
+  }
+  return j;
+}
+function num(v){return v==null?"-":Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4})}
+function pct(v){return v==null?"-":(Number(v)>=0?"+":"")+Number(v).toFixed(2)+"%"}
+function dt(v){return v?new Date(v).toLocaleString():"-"}
+
+function sessionFromTimestamp(ts){
+  if(!ts)return "-";
+  const d=new Date(ts);
+  const parts=new Intl.DateTimeFormat("en-US",{
+    timeZone:"America/New_York",hour:"2-digit",minute:"2-digit",hour12:false
+  }).formatToParts(d);
+  const h=Number(parts.find(x=>x.type==="hour").value);
+  const m=Number(parts.find(x=>x.type==="minute").value);
+  const x=h*60+m;
+  if(x>=240 && x<570)return "プレマーケット";
+  if(x>=570 && x<960)return "通常取引";
+  if(x>=960 && x<1200)return "アフター";
+  return "市場時間外";
+}
+
+document.getElementById("run").onclick=async()=>{
+  const token=document.getElementById("token").value.trim();
+  const status=document.getElementById("status");
+  const tbody=document.getElementById("tbody");
+  const diag=document.getElementById("diag");
+  if(!token){alert("API Tokenを入力してください");return}
+  tbody.innerHTML="";
+  status.textContent=" 取得中...";
+  diag.textContent="";
+
+  try{
+    const codes=symbols.join(",");
+    const q=await api("/fund/quotes?region=US&codes="+encodeURIComponent(codes),token);
+
+    // Batch fund tick: latest trade timestamp, used only to determine the session.
+    let ticks=null, tickError=null;
+    try{
+      ticks=await api("/fund/ticks?region=US&codes="+encodeURIComponent(codes),token);
+    }catch(e){tickError=String(e)}
+
+    for(const s of symbols){
+      const d=(q.data||{})[s];
+      const t=(ticks?.data||{})[s];
+      const latest=d?.ld, prev=d?.p, ch=d?.ch, chp=d?.chp;
+      const stamp=t?.t ?? d?.t;
+      const tr=document.createElement("tr");
+      tr.innerHTML=
+        "<td><b>"+s+"</b></td>"+
+        "<td>"+num(latest)+"</td>"+
+        "<td>"+num(prev)+"</td>"+
+        "<td>"+(ch==null?"-":(Number(ch)>=0?"+":"")+num(ch)+" ("+pct(chp)+")")+"</td>"+
+        "<td>"+sessionFromTimestamp(stamp)+"</td>"+
+        "<td>"+dt(stamp)+"</td>";
+      tbody.appendChild(tr);
+    }
+
+    diag.textContent=JSON.stringify({
+      endpoint:BASE,
+      quote_api:{code:q.code,msg:q.msg,received_symbols:Object.keys(q.data||{})},
+      tick_api:{code:ticks?.code,msg:ticks?.msg,received_symbols:Object.keys(ticks?.data||{}),error:tickError}
+    },null,2);
+    status.textContent=" 完了";
+  }catch(e){
+    status.textContent=" エラー";
+    diag.textContent=String(e.stack||e);
+  }
+};
+</script>
+</body>
+</html>
