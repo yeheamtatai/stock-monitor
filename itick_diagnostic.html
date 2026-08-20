@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>米株取得テスト・診断版</title>
+<style>
+body{font-family:Arial,"Noto Sans JP",sans-serif;max-width:950px;margin:30px auto;padding:0 16px;color:#222}
+h1{font-size:24px}.note{color:#666}
+button{padding:10px 18px;margin:8px 0;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:20px}
+th,td{border-bottom:1px solid #ddd;padding:9px;text-align:right}
+th:first-child,td:first-child{text-align:left}
+pre{background:#f5f5f5;padding:14px;white-space:pre-wrap;overflow:auto}
+.ok{color:green}.err{color:#b00020}
+</style>
+</head>
+<body>
+<h1>米株取得テスト・診断版</h1>
+<p class="note">NVDU / MUU / SOXL / UGLD / BABX</p>
+<button id="run">株価を取得</button>
+<span id="status"></span>
+
+<table>
+<thead>
+<tr><th>銘柄</th><th>現在値</th><th>前日終値</th><th>前日比</th><th>時刻</th><th>状態</th></tr>
+</thead>
+<tbody id="tbody"></tbody>
+</table>
+
+<h3>診断情報</h3>
+<pre id="diag">未実行</pre>
+
+<script>
+(function(){
+"use strict";
+
+var PROXY = "https://stock-proxy.yeheamtatai.workers.dev";
+var SYMBOLS = ["NVDU","MUU","SOXL","UGLD","BABX"];
+
+function show(v){
+  if(v === null || v === undefined){ return "-"; }
+  return Number(v).toLocaleString(undefined,{
+    minimumFractionDigits:2,
+    maximumFractionDigits:4
+  });
+}
+
+function percent(v){
+  if(v === null || v === undefined){ return "-"; }
+  return (Number(v) >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+}
+
+function dateText(v){
+  if(!v){ return "-"; }
+  try { return new Date(v).toLocaleString(); }
+  catch(e){ return String(v); }
+}
+
+function writeDiag(text, cls){
+  var el=document.getElementById("diag");
+  el.textContent=text;
+  el.className=cls || "";
+}
+
+document.getElementById("run").onclick=function(){
+  var status=document.getElementById("status");
+  var tbody=document.getElementById("tbody");
+
+  status.textContent=" 取得中...";
+  status.className="";
+  tbody.innerHTML="";
+  writeDiag("Cloudflare Workerへ接続しています...");
+
+  var xhr=new XMLHttpRequest();
+  var url=PROXY+"/quotes?codes="+encodeURIComponent(SYMBOLS.join(","));
+
+  try{
+    xhr.open("GET",url,true);
+    xhr.timeout=15000;
+  }catch(e){
+    writeDiag("【Step 1】Worker URLの設定でエラー\n\n"+e.message,"err");
+    status.textContent=" エラー";
+    return;
+  }
+
+  xhr.onreadystatechange=function(){
+    if(xhr.readyState!==4){ return; }
+
+    var headerInfo="";
+    try{ headerInfo=xhr.getAllResponseHeaders(); }catch(e){}
+
+    if(xhr.status===0){
+      writeDiag(
+        "【Step 2】Cloudflare Workerへ接続できませんでした。\n\n"+
+        "URL:\n"+url+"\n\n"+
+        "考えられる原因：\n"+
+        "・Workerが正常にDeployされていない\n"+
+        "・CORS設定の問題\n"+
+        "・ブラウザからWorkerへの通信失敗\n\n"+
+        "Response Headers:\n"+headerInfo,
+        "err"
+      );
+      status.textContent=" エラー";
+      return;
+    }
+
+    writeDiag(
+      "【Step 2】Cloudflare Workerから応答を受信しました。\n\n"+
+      "HTTP Status: "+xhr.status+"\n\n"+
+      "Response Headers:\n"+headerInfo+
+      "\n\nResponse Body:\n"+xhr.responseText,
+      xhr.status===200 ? "ok" : "err"
+    );
+
+    if(xhr.status!==200){
+      status.textContent=" エラー";
+      return;
+    }
+
+    var data;
+    try{
+      data=JSON.parse(xhr.responseText);
+    }catch(e){
+      writeDiag(
+        "【Step 3】Workerの応答をJSONとして読めませんでした。\n\n"+
+        "HTTP Status: "+xhr.status+
+        "\n\nResponse Body:\n"+xhr.responseText,
+        "err"
+      );
+      status.textContent=" エラー";
+      return;
+    }
+
+    if(data.code!==0){
+      writeDiag(
+        "【Step 3】iTick APIからエラーが返りました。\n\n"+
+        "API code: "+data.code+
+        "\nAPI message: "+JSON.stringify(data.msg)+
+        "\n\nResponse:\n"+JSON.stringify(data,null,2),
+        "err"
+      );
+      status.textContent=" エラー";
+      return;
+    }
+
+    var received=data.data || {};
+    var names=Object.keys(received);
+
+    for(var i=0;i<SYMBOLS.length;i++){
+      var s=SYMBOLS[i];
+      var d=received[s];
+      var tr=document.createElement("tr");
+
+      if(!d){
+        tr.innerHTML="<td><b>"+s+"</b></td><td colspan='5'>データなし</td>";
+      }else{
+        tr.innerHTML=
+          "<td><b>"+s+"</b></td>"+
+          "<td>"+show(d.ld)+"</td>"+
+          "<td>"+show(d.p)+"</td>"+
+          "<td>"+show(d.ch)+" ("+percent(d.chp)+")</td>"+
+          "<td>"+dateText(d.t)+"</td>"+
+          "<td>"+(d.ts === undefined ? "-" : d.ts)+"</td>";
+      }
+      tbody.appendChild(tr);
+    }
+
+    writeDiag(
+      "【成功】Cloudflare Worker → iTick の通信に成功しました。\n\n"+
+      "HTTP Status: "+xhr.status+
+      "\niTick code: "+data.code+
+      "\n取得銘柄: "+names.join(", ")+
+      "\n\nResponse:\n"+JSON.stringify(data,null,2),
+      "ok"
+    );
+    status.textContent=" 完了";
+  };
+
+  xhr.onerror=function(){
+    writeDiag(
+      "【通信エラー】ブラウザからCloudflare Workerへ接続できませんでした。\n\n"+
+      "Worker URL:\n"+url+
+      "\n\n現在の画面をそのままにして、診断情報を確認してください。",
+      "err"
+    );
+    status.textContent=" エラー";
+  };
+
+  xhr.ontimeout=function(){
+    writeDiag(
+      "【タイムアウト】15秒以内にCloudflare Workerから応答がありませんでした。\n\n"+
+      "Worker URL:\n"+url,
+      "err"
+    );
+    status.textContent=" エラー";
+  };
+
+  try{
+    xhr.send();
+  }catch(e){
+    writeDiag(
+      "【Step 2】通信開始時にJavaScriptエラーが発生しました。\n\n"+
+      e.name+": "+e.message,
+      "err"
+    );
+    status.textContent=" エラー";
+  }
+};
+})();
+</script>
+</body>
+</html>
