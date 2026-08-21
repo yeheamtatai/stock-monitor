@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>米株リアルタイム取得テスト</title>
+<style>
+body{font-family:Arial,"Noto Sans JP",sans-serif;max-width:950px;margin:30px auto;padding:0 16px;color:#222}
+h1{font-size:24px}.note{color:#666}button{padding:10px 18px;margin:8px 0;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:20px}th,td{border-bottom:1px solid #ddd;padding:9px;text-align:right}
+th:first-child,td:first-child{text-align:left}pre{background:#f5f5f5;padding:14px;white-space:pre-wrap;overflow:auto}
+</style>
+</head>
+<body>
+<h1>米株リアルタイム取得テスト</h1>
+<p class="note">NVDU / MUU / SOXL / NUGT / BABX</p>
+<button id="run">株価を取得</button><span id="status"></span>
+<table><thead><tr><th>銘柄</th><th>現在値</th><th>前日終値</th><th>前日比</th><th>時刻</th><th>状態</th></tr></thead><tbody id="tbody"></tbody></table>
+<h3>診断情報</h3><pre id="diag">未実行</pre>
+<script>
+(function(){
+"use strict";
+var PROXY="https://stock-proxy.yeheamtatai.workers.dev";
+var SYMBOLS=["NVDU","MUU","SOXL","NUGT","BABX"];
+function show(v){if(v===null||v===undefined)return "-";return Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:4});}
+function percent(v){if(v===null||v===undefined)return "-";return(Number(v)>=0?"+":"")+Number(v).toFixed(2)+"%";}
+function dateText(v){if(!v)return "-";try{return new Date(v).toLocaleString();}catch(e){return String(v);}}
+document.getElementById("run").onclick=function(){
+var status=document.getElementById("status"),tbody=document.getElementById("tbody"),diag=document.getElementById("diag");
+status.textContent=" 取得中...";tbody.innerHTML="";diag.textContent="取得中...";
+var xhr=new XMLHttpRequest(),url=PROXY+"/quotes?codes="+encodeURIComponent(SYMBOLS.join(","));
+try{xhr.open("GET",url,true);xhr.timeout=20000;}catch(e){diag.textContent="URL設定エラー\n"+e.message;status.textContent=" エラー";return;}
+xhr.onreadystatechange=function(){
+if(xhr.readyState!==4)return;
+if(xhr.status===0){diag.textContent="Cloudflare Workerへ接続できませんでした。\n\n"+url;status.textContent=" エラー";return;}
+if(xhr.status!==200){diag.textContent="Worker HTTPエラー: "+xhr.status+"\n\n"+xhr.responseText;status.textContent=" エラー";return;}
+var data;try{data=JSON.parse(xhr.responseText);}catch(e){diag.textContent="JSON解析エラー\n\n"+xhr.responseText;status.textContent=" エラー";return;}
+for(var i=0;i<SYMBOLS.length;i++){var s=SYMBOLS[i],d=(data.data||{})[s],tr=document.createElement("tr");
+if(!d)tr.innerHTML="<td><b>"+s+"</b></td><td colspan='5'>データなし</td>";
+else tr.innerHTML="<td><b>"+s+"</b></td><td>"+show(d.ld)+"</td><td>"+show(d.p)+"</td><td>"+show(d.ch)+" ("+percent(d.chp)+")</td><td>"+dateText(d.t)+"</td><td>"+(d.ts===undefined?"-":d.ts)+"</td>";
+tbody.appendChild(tr);}
+diag.textContent="取得成功\nHTTP: "+xhr.status+"\niTick code: "+data.code+"\n取得銘柄: "+Object.keys(data.data||{}).join(", ")+(Object.keys(data.errors||{}).length?"\n取得できなかった銘柄: "+Object.keys(data.errors).join(", "):"")+"\n\n"+JSON.stringify(data,null,2);
+status.textContent=" 完了";
+};
+xhr.onerror=function(){diag.textContent="通信エラー\nCloudflare Workerとの通信に失敗しました。";status.textContent=" エラー";};
+xhr.ontimeout=function(){diag.textContent="タイムアウト\n20秒以内に応答がありませんでした。";status.textContent=" エラー";};
+xhr.send();
+};
+})();
+</script>
+</body>
+</html>
