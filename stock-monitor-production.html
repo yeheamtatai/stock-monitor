@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>米株モニター</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f6f7f9;color:#202124;font-family:system-ui,-apple-system,"Segoe UI","Noto Sans JP",sans-serif}
+.wrap{max-width:1000px;margin:auto;padding:20px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-size:24px;margin:0}.user{font-size:13px;color:#666}
+.actions,.add{display:flex;gap:8px;margin:18px 0}
+.add input{width:180px;padding:9px;border:1px solid #ccc;border-radius:7px;text-transform:uppercase}
+button{border:0;border-radius:7px;padding:9px 14px;cursor:pointer;background:#202124;color:#fff}
+button.secondary,.delete{background:#e8eaed;color:#202124}
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{padding:12px 10px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{font-size:13px;color:#666;background:#fafafa}.symbol{font-weight:700}
+.drag{cursor:grab;color:#999;margin-right:8px}.delete{padding:5px 9px;font-size:12px}
+.pos{color:#07883f}.neg{color:#c5221f}.small{font-size:13px;color:#666}
+.login{margin:50px auto;text-align:center;max-width:450px;background:#fff;padding:30px;border-radius:12px}
+.mobile-note{display:none}
+@media(max-width:650px){.wrap{padding:12px}.add,.desktop-only{display:none}.mobile-note{display:block}th,td{padding:10px 6px;font-size:13px}}
+</style>
+</head>
+<body>
+
+<div id="login" class="login">
+<h1>米株モニター</h1>
+<p>Googleログインして銘柄リストをPC・スマホで共有します。</p>
+<button id="loginBtn">Googleでログイン</button>
+</div>
+
+<div id="app" class="wrap" style="display:none">
+<div class="top">
+  <div><h1>米株モニター</h1><div id="user" class="user"></div></div>
+  <button id="logout" class="secondary">ログアウト</button>
+</div>
+
+<div class="actions">
+  <button id="refresh">株価を取得</button>
+</div>
+
+<div class="add">
+  <input id="symbolInput" maxlength="12" placeholder="銘柄コード 例: NVDA">
+  <button id="addBtn">銘柄を追加</button>
+</div>
+
+<div id="message" class="small"></div>
+<div class="mobile-note small">スマホでは閲覧のみ。銘柄の追加・削除・並べ替えはPCで行ってください。</div>
+
+<table>
+<thead>
+<tr>
+<th>銘柄</th><th>現在値</th><th>前日終値</th><th>前日比</th><th>取得時刻</th><th class="desktop-only"></th>
+</tr>
+</thead>
+<tbody id="rows"></tbody>
+</table>
+
+<p class="small">「株価を取得」を押した時点の取得値です。自動更新はしません。</p>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
+import {
+  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc
+} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyC_mp1WFGY7H6ufEO6Y1T7rlQ_JDf7WNUs",
+  authDomain: "stock-monitor-9ec36.firebaseapp.com",
+  projectId: "stock-monitor-9ec36",
+  storageBucket: "stock-monitor-9ec36.firebasestorage.app",
+  messagingSenderId: "364353865488",
+  appId: "1:364353865488:web:a6f27c173fc59de42dc795",
+  measurementId: "G-VHPG09E7G2"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const provider = new GoogleAuthProvider();
+
+const PROXY = "https://stock-proxy.yeheamtatai.workers.dev";
+const DEFAULTS = ["NVDU","MUU","SOXL","NUGT","BABX"];
+
+let uid = null;
+let tickers = [];
+let fetching = false;
+
+const $ = id => document.getElementById(id);
+
+function msg(text) {
+  $("message").textContent = text;
+}
+
+function money(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  return Number(value).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4
+  });
+}
+
+function pct(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  return (Number(value) >= 0 ? "+" : "") + Number(value).toFixed(2) + "%";
+}
+
+function render() {
+  const tbody = $("rows");
+  tbody.innerHTML = "";
+
+  tickers.forEach((symbol, index) => {
+    const tr = document.createElement("tr");
+    tr.dataset.index = index;
+    tr.draggable = true;
+
+    tr.innerHTML =
+      '<td><span class="drag desktop-only">☰</span><span class="symbol">' +
+      symbol +
+      '</span></td>' +
+      '<td class="price">-</td>' +
+      '<td class="prev">-</td>' +
+      '<td class="change">-</td>' +
+      '<td class="time">-</td>' +
+      '<td class="desktop-only"><button class="delete" data-index="' +
+      index + '">削除</button></td>';
+
+    tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll(".delete").forEach(button => {
+    button.onclick = async () => {
+      tickers.splice(Number(button.dataset.index), 1);
+      await saveTickers();
+      render();
+    };
+  });
+
+  setupDragAndDrop();
+}
+
+function setupDragAndDrop() {
+  const rows = [...$("rows").children];
+
+  rows.forEach(row => {
+    row.addEventListener("dragstart", e => {
+      e.dataTransfer.setData("text/plain", row.dataset.index);
+    });
+
+    row.addEventListener("dragover", e => {
+      e.preventDefault();
+    });
+
+    row.addEventListener("drop", async e => {
+      e.preventDefault();
+
+      const from = Number(e.dataTransfer.getData("text/plain"));
+      const to = Number(row.dataset.index);
+
+      if (from === to) return;
+
+      const item = tickers.splice(from, 1)[0];
+      tickers.splice(to, 0, item);
+
+      await saveTickers();
+      render();
+    });
+  });
+}
+
+async function saveTickers() {
+  if (!uid) return;
+
+  await setDoc(doc(db, "users", uid), {
+    tickers: tickers,
+    updatedAt: Date.now()
+  });
+}
+
+async function loadTickers() {
+  const snapshot = await getDoc(doc(db, "users", uid));
+
+  if (snapshot.exists() && Array.isArray(snapshot.data().tickers)) {
+    tickers = snapshot.data().tickers;
+  } else {
+    tickers = DEFAULTS.slice();
+    await saveTickers();
+  }
+
+  render();
+}
+
+/*
+ * 修正版の株価取得処理。
+ *
+ * Workerの実測レスポンス:
+ * {
+ *   code: 0,
+ *   data: {
+ *     NVDU: {...},
+ *     ...
+ *   },
+ *   errors: {...}
+ * }
+ *
+ * 以前の版ではレスポンスの値の扱いを厳密にしていなかったため、
+ * 実際のWorkerレスポンスに合わせてここで処理する。
+ */
+async function refreshPrices() {
+  if (fetching) {
+    msg("現在、株価を取得中です。少し待ってください。");
+    return;
+  }
+
+  if (!tickers.length) {
+    msg("銘柄がありません。");
+    return;
+  }
+
+  fetching = true;
+  $("refresh").disabled = true;
+  msg("株価を取得中...");
+
+  try {
+    const endpoint =
+      PROXY + "/quotes?codes=" +
+      encodeURIComponent(tickers.join(","));
+
+    const response = await fetch(endpoint, {
+      method: "GET",
+      cache: "no-store"
+    });
+
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      throw new Error("Worker HTTP " + response.status + ": " + rawText);
+    }
+
+    let result;
+
+    try {
+      result = JSON.parse(rawText);
+    } catch (e) {
+      throw new Error("WorkerからJSONではない応答が返りました: " + rawText);
+    }
+
+    const data = result && result.data ? result.data : {};
+    const errors = result && result.errors ? result.errors : {};
+
+    tickers.forEach((symbol, index) => {
+      const row = $("rows").children[index];
+      if (!row) return;
+
+      const item = data[symbol];
+
+      if (!item) {
+        row.querySelector(".price").textContent = "取得失敗";
+        row.querySelector(".prev").textContent = "-";
+        row.querySelector(".change").textContent =
+          errors[symbol] ? "APIエラー" : "-";
+        row.querySelector(".time").textContent = "-";
+        return;
+      }
+
+      /*
+       * iTick Fund APIのレスポンスをそのまま利用。
+       * ld = 最新値
+       * p  = 前日終値
+       * ch = 前日比額
+       * chp = 前日比率
+       * t  = 取得時刻
+       */
+      const last = item.ld;
+      const previous = item.p;
+      const change = item.ch;
+      const changePercent = item.chp;
+      const timestamp = item.t;
+
+      row.querySelector(".price").textContent = money(last);
+      row.querySelector(".prev").textContent = money(previous);
+
+      const changeCell = row.querySelector(".change");
+
+      let changeText = money(change);
+
+      if (changePercent !== null &&
+          changePercent !== undefined &&
+          changePercent !== "") {
+        changeText += " (" + pct(changePercent) + ")";
+      }
+
+      changeCell.textContent = changeText;
+      changeCell.className =
+        "change " + (Number(change) >= 0 ? "pos" : "neg");
+
+      if (timestamp) {
+        const date = new Date(timestamp);
+        changeCell.title = "取得時刻: " + date.toLocaleString();
+        row.querySelector(".time").textContent =
+          date.toLocaleString();
+      } else {
+        row.querySelector(".time").textContent = "-";
+      }
+    });
+
+    const successCount = Object.keys(data).length;
+    const errorCount = Object.keys(errors).length;
+
+    if (errorCount === 0) {
+      msg(successCount + "銘柄の取得完了");
+    } else {
+      const failed = Object.keys(errors).map(symbol => {
+        const e = errors[symbol];
+        let detail = "";
+        if (e && e.response) {
+          detail =
+            " code=" + (e.response.code ?? "?") +
+            " msg=" + (e.response.msg ?? "?");
+        } else if (e && e.http) {
+          detail = " HTTP=" + e.http;
+        }
+        return symbol + detail;
+      }).join(" / ");
+
+      msg(
+        successCount + "銘柄取得、" +
+        errorCount + "銘柄は取得できませんでした: " +
+        failed
+      );
+    }
+
+  } catch (error) {
+    console.error(error);
+    msg("取得エラー: " + error.message);
+  } finally {
+    fetching = false;
+    $("refresh").disabled = false;
+  }
+}
+
+$("loginBtn").onclick = async () => {
+  try {
+    await signInWithPopup(auth, provider);
+  } catch (error) {
+    console.error(error);
+    msg("ログインエラー: " + error.message);
+  }
+};
+
+$("logout").onclick = () => signOut(auth);
+
+$("refresh").onclick = refreshPrices;
+
+$("addBtn").onclick = async () => {
+  const symbol = $("symbolInput").value.trim().toUpperCase();
+
+  if (!symbol) return;
+
+  if (tickers.includes(symbol)) {
+    msg(symbol + " はすでに登録されています。");
+    return;
+  }
+
+  if (tickers.length >= 50) {
+    msg("登録できる銘柄は最大50銘柄です。");
+    return;
+  }
+
+  tickers.push(symbol);
+  $("symbolInput").value = "";
+
+  await saveTickers();
+  render();
+  msg(symbol + " を追加しました。");
+};
+
+$("symbolInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") $("addBtn").click();
+});
+
+onAuthStateChanged(auth, async user => {
+  if (!user) {
+    $("login").style.display = "block";
+    $("app").style.display = "none";
+    return;
+  }
+
+  uid = user.uid;
+
+  $("login").style.display = "none";
+  $("app").style.display = "block";
+
+  $("user").textContent =
+    (user.displayName || "") +
+    " (" + (user.email || "") + ")";
+
+  try {
+    await loadTickers();
+
+    // 株価は自動取得しません。
+    // 「株価を取得」ボタンを押した時だけAPIを呼び出します。
+
+  } catch (error) {
+    console.error(error);
+    msg("初期化エラー: " + error.message);
+  }
+});
+</script>
+</body>
+</html>
